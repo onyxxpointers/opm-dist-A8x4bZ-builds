@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OnyxPoint Media Spoofer - Downloads</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #101014; color: #e8e8ec;
+    font: 16px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 30px; margin: 0 0 4px; }
+  .sub { color: #9a9aa4; margin: 0 0 28px; }
+  .card {
+    background: #1a1a21; border: 1px solid #2c2c36; border-radius: 12px;
+    padding: 22px; margin: 0 0 18px;
+  }
+  .card.primary { border-color: #4a6cff; }
+  .tag {
+    display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; color: #8fa3ff; background: #232a4d;
+    border-radius: 999px; padding: 3px 10px; margin-bottom: 10px;
+  }
+  h2 { font-size: 20px; margin: 0 0 10px; }
+  p { margin: 8px 0; color: #c7c7d0; }
+  a.btn, button.btn {
+    display: inline-block; background: #4a6cff; color: #fff; text-decoration: none;
+    border: 0; border-radius: 8px; padding: 10px 18px; font-size: 15px; font-weight: 600;
+    cursor: pointer; margin: 6px 8px 6px 0;
+  }
+  a.btn.ghost, button.btn.ghost { background: #26262f; color: #dcdce4; border: 1px solid #3a3a46; }
+  code.cmd {
+    display: block; background: #0c0c10; border: 1px solid #2c2c36; border-radius: 8px;
+    padding: 12px 14px; margin: 10px 0; font: 13px/1.5 ui-monospace, Consolas, monospace;
+    color: #9fe3a8; overflow-x: auto; white-space: pre;
+  }
+  .meta { font-size: 13px; color: #8b8b96; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #26262f; }
+  th { color: #9a9aa4; font-weight: 600; }
+  td a { color: #8fa3ff; }
+  select {
+    background: #1a1a21; color: #e8e8ec; border: 1px solid #3a3a46;
+    border-radius: 8px; padding: 8px 10px; font-size: 15px;
+  }
+  .note { font-size: 13px; color: #8b8b96; }
+  .err { color: #ff8f8f; }
+  #status { color: #9a9aa4; }
+</style>
+</head>
+<body>
+<main>
+  <h1>OnyxPoint Media Spoofer</h1>
+  <p class="sub">Downloads for Windows and macOS. This page always reads the live release
+     list, so the button below is never out of date.</p>
+
+  <div id="status">Loading releases&hellip;</div>
+  <div id="latest"></div>
+
+  <div class="card" id="historyCard" hidden>
+    <span class="tag">All versions</span>
+    <h2>Pick a specific version</h2>
+    <p class="note">Newest is recommended. Older versions are kept for anyone who needs to
+       match an existing install.</p>
+    <p><select id="versionSelect"></select></p>
+    <div id="versionDetail"></div>
+  </div>
+
+  <div class="card">
+    <span class="tag">Notes</span>
+    <h2>Before you install</h2>
+    <p>Windows: existing installs update themselves on next launch. You will be asked first.</p>
+    <p>Mac: the one-line command detects whether your Mac is Apple Silicon or Intel and installs
+       the right build. Apple menu &gt; About This Mac tells you which you have if you prefer to
+       pick manually.</p>
+    <p class="note">Mac builds are not notarized. If macOS says it cannot check the app, go to
+       System Settings &gt; Privacy &amp; Security &gt; Open Anyway. Installing with the one-line
+       command usually avoids this entirely.</p>
+  </div>
+</main>
+
+<script>
+const REPO = "onyxxpointers/opm-dist-A8x4bZ-builds";
+const API = "https://api.github.com/repos/" + REPO + "/releases?per_page=50";
+const INSTALL_CMD =
+  "bash <(curl -fsSL https://raw.githubusercontent.com/" + REPO + "/main/install-mac.sh)";
+
+const isWindows = /Windows/i.test(navigator.userAgent);
+const isMac = /Macintosh|Mac OS X/i.test(navigator.userAgent);
+
+function asset(release, name) {
+  return (release.assets || []).find(a => a.name === name);
+}
+function size(a) {
+  return a ? (a.size / 1048576).toFixed(1) + " MB" : "";
+}
+function copyCmd(btn) {
+  navigator.clipboard.writeText(INSTALL_CMD).then(() => {
+    const old = btn.textContent;
+    btn.textContent = "Copied";
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  });
+}
+
+function assetTable(release) {
+  const rows = (release.assets || []).map(a =>
+    "<tr><td><code>" + a.name + "</code></td><td>" + size(a) +
+    "</td><td><a href=\"" + a.browser_download_url + "\">download</a></td></tr>").join("");
+  return "<table><tr><th>File</th><th>Size</th><th></th></tr>" + rows + "</table>";
+}
+
+function renderLatest(release) {
+  const exe = asset(release, "opmspoofer.exe");
+  let html = "<div class=\"card primary\"><span class=\"tag\">Latest &middot; " +
+             release.tag_name + "</span><h2>Get the current version</h2>";
+
+  if (isWindows) {
+    html += "<p>Detected Windows.</p>";
+    if (exe) {
+      html += "<a class=\"btn\" href=\"" + exe.browser_download_url + "\">Download for Windows (" +
+              size(exe) + ")</a>";
+    }
+    html += "<p class=\"note\">Or on a Mac instead? Use the command below.</p>";
+  } else if (isMac) {
+    html += "<p>Detected macOS. This command picks the right build for your chip automatically.</p>";
+  } else {
+    html += "<p>Could not detect your system, so here is everything.</p>";
+  }
+
+  if (isMac || !isWindows) {
+    html += "<code class=\"cmd\">" + INSTALL_CMD + "</code>" +
+            "<button class=\"btn ghost\" onclick=\"copyCmd(this)\">Copy Mac install command</button>";
+  }
+  html += "<details style=\"margin-top:12px\"><summary class=\"meta\">All files in this release" +
+          "</summary>" + assetTable(release) + "</details></div>";
+  return html;
+}
+
+function renderHistory(releases) {
+  const sel = document.getElementById("versionSelect");
+  sel.innerHTML = releases.map(r =>
+    "<option value=\"" + r.id + "\">" + r.tag_name + "</option>").join("");
+  sel.onchange = () => {
+    const r = releases.find(x => x.id === Number(sel.value));
+    document.getElementById("versionDetail").innerHTML = assetTable(r);
+  };
+  sel.onchange();
+  document.getElementById("historyCard").hidden = false;
+}
+
+fetch(API)
+  .then(r => {
+    if (!r.ok) throw new Error("GitHub API returned " + r.status);
+    return r.json();
+  })
+  .then(releases => {
+    if (!releases.length) {
+      document.getElementById("status").innerHTML =
+        "<span class=\"err\">No releases published yet.</span>";
+      return;
+    }
+    document.getElementById("status").textContent =
+      releases.length + " releases found. Latest is " + releases[0].tag_name + ".";
+    document.getElementById("latest").innerHTML = renderLatest(releases[0]);
+    renderHistory(releases);
+  })
+  .catch(e => {
+    document.getElementById("status").innerHTML =
+      "<span class=\"err\">Could not load the release list: " + e.message +
+      ". <a href=\"https://github.com/" + REPO + "/releases\">Browse releases on GitHub</a>.</span>";
+  });
+</script>
+</body>
+</html>
