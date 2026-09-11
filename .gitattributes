@@ -1,0 +1,5 @@
+# install-mac.sh runs on macOS. A CRLF checkout would make the shebang
+# "#!/bin/bash\r" and the script would die with "bad interpreter".
+*.sh text eol=lf
+*.txt text
+*.md text
