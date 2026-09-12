@@ -1,0 +1,1 @@
+cd4035e06886bd081cb848d3786f4a663ca31139bdf5f8d9574b260a705c0d18  opmspoofer-macos-arm64.zip
