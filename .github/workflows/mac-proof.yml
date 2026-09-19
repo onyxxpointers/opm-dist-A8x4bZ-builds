@@ -1,0 +1,117 @@
+name: mac-proof-one-run
+on: workflow_dispatch
+jobs:
+  proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            ffarch: arm64
+          - arch: x86_64
+            runner: macos-15-intel
+            ffarch: amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Clone app source (read-only deploy key)
+        env:
+          KEY: ${{ secrets.MAC_PROOF_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/macproof
+          chmod 600 ~/.ssh/macproof
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/macproof -o IdentitiesOnly=yes"
+          git clone --depth 1 git@github.com:onyxxpointers/opmspoofer.git src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r src/requirements.txt
+      - name: FFmpeg
+        run: |
+          set -euo pipefail
+          base="https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.ffarch }}/snapshot"
+          for tool in ffmpeg ffprobe; do
+            curl -fL --retry 3 -o "$tool.zip" "$base/$tool.zip"
+            unzip -o -q "$tool.zip"; rm -f "$tool.zip"; chmod +x "$tool"
+          done
+          mv ffmpeg ffprobe src/
+      - name: secrets_local stub
+        run: cp src/secrets_local.example.py src/secrets_local.py
+      - name: Build .app
+        run: |
+          set -euo pipefail
+          cd src
+          python -m PyInstaller --noconfirm --windowed --name opmspoofer \
+            --add-data "logo.jpeg:." --icon logo.ico --clean \
+            --hidden-import numpy.core._dtype_ctypes --hidden-import secrets_local \
+            --add-binary "ffmpeg:." --add-binary "ffprobe:." OPSuperSpoofer.py
+          chmod +x dist/opmspoofer.app/Contents/MacOS/opmspoofer
+      - name: Selftest
+        run: |
+          cd src
+          dist/opmspoofer.app/Contents/MacOS/opmspoofer --selftest || true
+      - name: Update proof on camera
+        env:
+          OPM_UPDATE_ASSUME_YES: "1"
+        run: |
+          set -uo pipefail
+          cd src
+          mkdir -p ../proof
+          ARCH="$(uname -m)"
+          FAKE="$RUNNER_TEMP/FakeApps"; rm -rf "$FAKE"; mkdir -p "$FAKE"
+          cp -R dist/opmspoofer.app "$FAKE/opmspoofer.app"
+          STAGE="$RUNNER_TEMP/newver"; rm -rf "$STAGE"; mkdir -p "$STAGE"
+          cp -R dist/opmspoofer.app "$STAGE/opmspoofer.app"
+          echo "99.0" > "$STAGE/opmspoofer.app/Contents/Resources/UPDATE_MARKER.txt"
+          ( cd "$STAGE" && ditto -c -k --sequesterRsrc --keepParent opmspoofer.app "opmspoofer-macos-${ARCH}.zip" )
+          SHA="$(shasum -a 256 "$STAGE/opmspoofer-macos-${ARCH}.zip" | cut -d' ' -f1)"
+          SERVE="$RUNNER_TEMP/feed"; rm -rf "$SERVE"; mkdir -p "$SERVE"
+          echo "99.0" > "$SERVE/version.txt"
+          echo "${SHA}  opmspoofer-macos-${ARCH}.zip" > "$SERVE/sha256-macos-${ARCH}.txt"
+          cp "$STAGE/opmspoofer-macos-${ARCH}.zip" "$SERVE/"
+          ( cd "$SERVE" && nohup python -m http.server 8731 --bind 127.0.0.1 >"$RUNNER_TEMP/http.log" 2>&1 & echo $! > "$RUNNER_TEMP/feed.pid" )
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8731/version.txt >/dev/null 2>&1 && break; sleep 1; done
+          screencapture -x -v -V 120 ../proof/update-${ARCH}.mov &
+          REC=$!
+          ( for i in $(seq 1 40); do screencapture -x "../proof/frame-${ARCH}-$(printf '%02d' "$i").png" 2>/dev/null; sleep 2; done ) &
+          BURST=$!
+          OPM_UPDATE_FEED_URL="http://127.0.0.1:8731/version.txt" \
+          OPM_UPDATE_ASSET_BASE="http://127.0.0.1:8731" \
+          OPM_UPDATE_SHA_URL="http://127.0.0.1:8731/sha256-macos-${ARCH}.txt" \
+            "$FAKE/opmspoofer.app/Contents/MacOS/opmspoofer" &
+          APP=$!
+          sleep 2
+          osascript -e 'tell application "opmspoofer" to activate' 2>/dev/null || true
+          ok=0
+          for i in $(seq 1 180); do
+            [ -f "$FAKE/opmspoofer.app/Contents/Resources/UPDATE_MARKER.txt" ] && { ok=1; break; }
+            sleep 1
+          done
+          kill "$(cat "$RUNNER_TEMP/feed.pid")" 2>/dev/null || true
+          sleep 6
+          cat "$FAKE/opmspoofer-swap.log" 2>/dev/null | tee ../proof/swap-${ARCH}.log || true
+          "$FAKE/opmspoofer.app/Contents/MacOS/opmspoofer" &
+          sleep 8
+          if pgrep -f "FakeApps/opmspoofer.app" >/dev/null; then
+            echo "RELUNCH CONFIRMED ${ARCH}" | tee ../proof/relaunch-${ARCH}.txt
+          else
+            echo "relaunch not confirmed" | tee ../proof/relaunch-${ARCH}.txt
+          fi
+          { echo "arch=${ARCH}"; echo "marker=$(cat "$FAKE/opmspoofer.app/Contents/Resources/UPDATE_MARKER.txt" 2>/dev/null)"; echo "swap_ok=${ok}"; } > ../proof/evidence-${ARCH}.txt
+          wait $BURST 2>/dev/null || true
+          wait $REC 2>/dev/null || true
+          pkill -f "FakeApps/opmspoofer.app" 2>/dev/null || true
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-proof-${{ matrix.arch }}
+          path: proof/
+          retention-days: 1
