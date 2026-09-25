@@ -1,0 +1,176 @@
+name: mac-proof12
+on: workflow_dispatch
+jobs:
+  proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+            ffarch: arm64
+          - arch: x86_64
+            runner: macos-15-intel
+            ffarch: amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Clone app source (read-only deploy key)
+        env:
+          KEY: ${{ secrets.MAC_PROOF_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/macproof
+          chmod 600 ~/.ssh/macproof
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/macproof -o IdentitiesOnly=yes"
+          git clone --depth 1 git@github.com:onyxxpointers/opmspoofer.git src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Deps
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -r src/requirements.txt
+      - name: FFmpeg
+        run: |
+          set -euo pipefail
+          base="https://ffmpeg.martin-riedl.de/redirect/latest/macos/${{ matrix.ffarch }}/snapshot"
+          for tool in ffmpeg ffprobe; do
+            curl -fL --retry 3 -o "$tool.zip" "$base/$tool.zip"
+            unzip -o -q "$tool.zip"; rm -f "$tool.zip"; chmod +x "$tool"
+          done
+          mv ffmpeg ffprobe src/
+      - name: Loopback licence sheet + secrets_local
+        run: |
+          set -euo pipefail
+          mkdir -p sheet
+          printf 'owner,key\nCI Owner,DUMMY-KEY-1234\n' > sheet/keys.csv
+          ( cd sheet && nohup python -m http.server 8732 --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > sheet.pid )
+          printf 'LICENSE_SHEET_URL = "http://127.0.0.1:8732/keys.csv"\n' > src/secrets_local.py
+      - name: Build .app (v3.8.32)
+        run: |
+          set -euo pipefail
+          cd src
+          python -m PyInstaller --noconfirm --windowed --name opmspoofer \
+            --add-data "logo.jpeg:." --icon logo.ico --clean \
+            --hidden-import numpy.core._dtype_ctypes --hidden-import secrets_local \
+            --add-binary "ffmpeg:." --add-binary "ffprobe:." OPSuperSpoofer.py
+          chmod +x dist/opmspoofer.app/Contents/MacOS/opmspoofer
+      - name: Build .app (v99.0 update target)
+        run: |
+          set -euo pipefail
+          rm -rf src99 && cp -R src src99
+          cd src99
+          sed -i '' "s/return '3.8.32'/return '99.0'/" OPSuperSpoofer.py
+          grep -n "return '99.0'" OPSuperSpoofer.py
+          python -m PyInstaller --noconfirm --windowed --name opmspoofer \
+            --add-data "logo.jpeg:." --icon logo.ico --clean \
+            --hidden-import numpy.core._dtype_ctypes --hidden-import secrets_local \
+            --add-binary "ffmpeg:." --add-binary "ffprobe:." OPSuperSpoofer.py
+          chmod +x dist/opmspoofer.app/Contents/MacOS/opmspoofer
+      - name: Update proof on camera (activated app, visible version jump)
+        run: |
+          set -uo pipefail
+          cd src
+          mkdir -p ../proof
+          ARCH="$(uname -m)"
+          FAKE="$RUNNER_TEMP/FakeApps"; rm -rf "$FAKE"; mkdir -p "$FAKE"
+          cp -R dist/opmspoofer.app "$FAKE/opmspoofer.app"
+          STAGE="$RUNNER_TEMP/newver"; rm -rf "$STAGE"; mkdir -p "$STAGE"
+          cp -R ../src99/dist/opmspoofer.app "$STAGE/opmspoofer.app"
+          echo "99.0" > "$STAGE/opmspoofer.app/Contents/Resources/UPDATE_MARKER.txt"
+          ( cd "$STAGE" && ditto -c -k --sequesterRsrc --keepParent opmspoofer.app "opmspoofer-macos-${ARCH}.zip" )
+          SHA="$(shasum -a 256 "$STAGE/opmspoofer-macos-${ARCH}.zip" | cut -d' ' -f1)"
+          SERVE="$RUNNER_TEMP/feed"; rm -rf "$SERVE"; mkdir -p "$SERVE"
+          echo "99.0" > "$SERVE/version.txt"
+          echo "${SHA}  opmspoofer-macos-${ARCH}.zip" > "$SERVE/sha256-macos-${ARCH}.txt"
+          cp "$STAGE/opmspoofer-macos-${ARCH}.zip" "$SERVE/"
+          ( cd "$SERVE" && nohup python -m http.server 8731 --bind 127.0.0.1 >"$RUNNER_TEMP/http.log" 2>&1 & echo $! > "$RUNNER_TEMP/feed.pid" )
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8731/version.txt >/dev/null 2>&1 && break; sleep 1; done
+          screencapture -x -v -V 480 ../proof/raw-${ARCH}.mov &
+          REC=$!
+          ( for i in $(seq 1 300); do screencapture -x "../proof/frame-${ARCH}-$(printf '%03d' "$i").png" 2>/dev/null; sleep 1; done ) &
+          BURST=$!
+          # app exactly as shipped, unactivated: licence screen on camera
+          "$FAKE/opmspoofer.app/Contents/MacOS/opmspoofer" &
+          APP=$!
+          sleep 12
+          brew list cliclick >/dev/null 2>&1 || brew install cliclick >/dev/null 2>&1 || true
+          cat > /tmp/winbounds.swift <<'SW'
+          import CoreGraphics
+          if let list = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] {
+            for w in list {
+              if let owner = w[kCGWindowOwnerName as String] as? String, owner == "opmspoofer",
+                 let b = w[kCGWindowBounds as String] as? [String: Int] {
+                print(b["X"]!, b["Y"]!, b["Width"]!, b["Height"]!); break
+              }
+            }
+          }
+          SW
+          BOUNDS=$(swift /tmp/winbounds.swift 2>/dev/null | head -n 1)
+          set -- $BOUNDS
+          if [ "$#" -eq 4 ]; then
+            EX=$(( $1 + $3 / 2 )); EY=$(( $2 + $4 * 64 / 100 ))
+            BX=$(( $1 + $3 / 2 )); BY=$(( $2 + $4 * 76 / 100 ))
+            sudo -n cliclick "c:$EX,$EY" || true
+            sleep 1
+            sudo -n cliclick "t:DUMMY-KEY-1234" || true
+            sleep 1
+            sudo -n cliclick kp:return || true
+            sleep 4
+            if [ ! -f ~/.OnyxPointMediaSpoofer/config.json ]; then
+              sudo -n cliclick "c:$BX,$BY" || true
+              sleep 4
+            fi
+          fi
+          if [ ! -f ~/.OnyxPointMediaSpoofer/config.json ]; then
+            mkdir -p ~/.OnyxPointMediaSpoofer
+            printf '{"license_key": "DUMMY-KEY-1234", "owner_name": "CI Owner"}' > ~/.OnyxPointMediaSpoofer/config.json
+            pkill -f "FakeApplications/opmspoofer.app" 2>/dev/null || true
+            sleep 3
+            "$FAKE/opmspoofer.app/Contents/MacOS/opmspoofer" &
+            APP=$!
+            sleep 2
+          fi
+          osascript -e 'tell application "opmspoofer" to activate' 2>/dev/null || true
+          sleep 15
+          sudo -n cliclick kp:return || true
+          sleep 3
+          ok=0
+          for i in $(seq 1 240); do
+            [ -f "$FAKE/opmspoofer.app/Contents/Resources/UPDATE_MARKER.txt" ] && { ok=1; break; }
+            sleep 1
+          done
+          kill "$(cat "$RUNNER_TEMP/feed.pid")" 2>/dev/null || true
+          sleep 6
+          cat "$FAKE/opmspoofer-swap.log" 2>/dev/null | tee ../proof/swap-${ARCH}.log || true
+          "$FAKE/opmspoofer.app/Contents/MacOS/opmspoofer" &
+          sleep 10
+          screencapture -x "../proof/final-${ARCH}.png" 2>/dev/null || true
+          if pgrep -f "FakeApps/opmspoofer.app" >/dev/null; then
+            echo "RELUNCH CONFIRMED ${ARCH}" | tee ../proof/relaunch-${ARCH}.txt
+          else
+            echo "relaunch not confirmed" | tee ../proof/relaunch-${ARCH}.txt
+          fi
+          { echo "arch=${ARCH}"; echo "marker=$(cat "$FAKE/opmspoofer.app/Contents/Resources/UPDATE_MARKER.txt" 2>/dev/null)"; echo "swap_ok=${ok}"; } > ../proof/evidence-${ARCH}.txt
+          sleep 15
+          osascript -e 'display dialog "UPDATE COMPLETE - now running v99.0" buttons {"OK"} giving up after 20' &
+          sleep 12
+          screencapture -x "../proof/final2-${ARCH}.png" 2>/dev/null || true
+          sleep 18
+          screencapture -x "../proof/final3-${ARCH}.png" 2>/dev/null || true
+          wait $BURST 2>/dev/null || true
+          wait $REC 2>/dev/null || true
+          if [ -f ../proof/raw-${ARCH}.mov ]; then
+            mv ../proof/raw-${ARCH}.mov ../proof/RAW-SCREENCAP-${ARCH}.mov
+          fi
+          pkill -f "FakeApps/opmspoofer.app" 2>/dev/null || true
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-proof12-${{ matrix.arch }}
+          path: proof/
+          retention-days: 1
